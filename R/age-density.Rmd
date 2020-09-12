@@ -1,0 +1,217 @@
+---
+title: "COVID-19 age-specific reporting rates in Austria"
+description: |
+  Exploration of the temporal evolution of the age distribution of 
+  COVID-19 reporting rates in Austria.
+author:
+- name: Fabian Valka
+  affiliation: vektorraum
+  affiliation_url: https://www.vektorraum.com/
+date: "`r Sys.Date()`"
+citation_url: https://fvalka.github.io/covid-austria-age-heterogenity/
+output: distill::distill_article
+---
+
+<!-- Matomo -->
+<script type="text/javascript">
+  var _paq = window._paq || [];
+  /* tracker methods like "setCustomDimension" should be called before "trackPageView" */
+  _paq.push(["setDoNotTrack", true]);
+  _paq.push(["disableCookies"]);
+  _paq.push(['trackPageView']);
+  _paq.push(['enableLinkTracking']);
+  (function() {
+    var u="//analytics.covid19-r.com/";
+    _paq.push(['setTrackerUrl', u+'matomo.php']);
+    _paq.push(['setSiteId', '5']);
+    var d=document, g=d.createElement('script'), s=d.getElementsByTagName('script')[0];
+    g.type='text/javascript'; g.async=true; g.defer=true; g.src=u+'matomo.js'; s.parentNode.insertBefore(g,s);
+  })();
+</script>
+<!-- End Matomo Code -->
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(echo = FALSE)
+library(here)
+library(ggplot2)
+library(ggpubr)
+library(lubridate)
+library(RcppRoll)
+library(forecast)
+
+source(here("R/functions/fix-negative-incidence.R"))
+source(here("R/functions/austrian-demography.R"))
+source(here("R/pipeline/convert-age-stratified-time-series.R"))
+
+convert_age_stratified_time_series()
+
+population_stratified <- gather(
+  as_tibble(
+    as.list(c(
+      "<5"=demo_age_group_total(0:4),
+      "5-14"=demo_age_group_total(5:14),
+      "15-24"=demo_age_group_total(15:24),
+      "25-34"=demo_age_group_total(25:34),
+      "35-44"=demo_age_group_total(35:44),
+      "45-54"=demo_age_group_total(45:54),
+      "55-64"=demo_age_group_total(55:64),
+      "65-74"=demo_age_group_total(65:74),
+      "75-84"=demo_age_group_total(75:84),
+      ">84"=demo_age_group_total(85:100),
+      ">24"=demo_age_group_total(25:100)))), "age_group", "pop")
+
+plot_order <- c("<5", "5-14", "15-24", "25-34", "35-44", "45-54", "55-64", "65-74", "75-84", ">84")
+
+data <- read.csv(here("data/age-stratified-incidence-austria.csv"))
+
+data <- data %>%
+  group_by(age_group) %>%
+  mutate(incidence=fix_negative_incidence(incidence)) %>% 
+  mutate(incidence_7day = roll_meanr(incidence, 7)) %>% 
+  left_join(population_stratified) %>%
+  mutate(incidence_7day_per_capita = incidence_7day/pop*10e5) %>%
+  mutate(incidence_per_capita = incidence/pop*10e5) %>%
+  filter(row_number() > 7 & row_number() < n()) %>%
+  mutate(date=ymd(date))
+
+rel_incidence <- data %>%
+  mutate(incidence_per_capita_rel = incidence_7day_per_capita/max(incidence_7day_per_capita)) %>%
+  filter(n() - row_number() <= 45)
+
+pal_grad3 <- c("#10547E", "#82BC24", "#FFCE47", "#FF0A12")
+
+last_update <- max(data$date)
+
+```
+
+# New cases per 100k people in age group
+
+The reporting rate for each age-group is calculated by dividing the 
+number of reported COVID-19 cases in the age-group by the number of people
+in that specific age-group. 
+
+Last update: `r last_update`
+
+### Heatmap, 7-day moving average
+
+```{r, echo=FALSE, fig.fullwidth=TRUE, layout="l-page"}
+age_density_plot <- data  %>%
+  ggplot() +
+  geom_raster(aes(x=date, y=age_group, fill=incidence_7day_per_capita, label=incidence_7day, label2=incidence)) +
+  scale_fill_gradientn(colours = colorRampPalette(pal_grad3,space="rgb", bias = 1.7)(1000),
+                       limits=c(0,200),
+                       n.breaks=5,
+                       guide = guide_colourbar(barwidth = 25,
+                                               title.position = "top",
+                                               title.hjust = 1)
+  ) +
+  scale_y_discrete(limits = plot_order) +
+  scale_x_date(date_minor_breaks = "1 week") + 
+  theme_pubclean() +
+  labs(fill="Cases\nper 100k", x=NULL, y="Age Group") +
+  theme(legend.position="right",
+        plot.title = element_text(hjust = 0.5, face = "bold", size=21, 
+                                  margin=margin(12,12,15,12)))
+
+plotly::ggplotly(age_density_plot, options=list(digits=1))
+
+```
+
+### Plot
+
+```{r, echo=FALSE, fig.fullwidth=TRUE, layout="l-page"}
+(data %>%
+   mutate(incidence_per_capita_rel = incidence_7day_per_capita/max(incidence_7day_per_capita)) %>%
+   ggplot() +
+   geom_line(aes(x=date, y=incidence_7day_per_capita, color=age_group)) +
+   scale_color_viridis_d(limits=plot_order, option = "plasma", direction=-1) +
+   theme_pubclean() +
+   labs(color="Age group") +
+   xlab("Date") + 
+   ylab("New cases per 100k people")) %>%
+  plotly::ggplotly()
+```
+
+# Proportions of the age-groups
+
+Proportions of the cases per 100k in each age-group to the sum of 
+cases per 100k in all age-groups. Both are smoothed using the 7-day moving average. 
+
+This visualization shows how over represented each age group is compared to
+the other age-groups, adjusted for the different population sizes in each age group. 
+
+### Heatmap
+
+```{r, echo=FALSE, fig.fullwidth=TRUE, layout="l-page"}
+
+total_incidence <- data %>% 
+  group_by(date) %>% 
+  summarise(total_incidence_7day_per_capita = sum(incidence_7day_per_capita))
+
+(data  %>%
+  left_join(total_incidence) %>%
+  mutate(relative_incidence = incidence_7day_per_capita/total_incidence_7day_per_capita) %>%
+  ggplot() +
+  geom_raster(aes(x=date, y=age_group, fill=relative_incidence)) +
+  scale_fill_gradientn(colours = colorRampPalette(pal_grad3,space="rgb")(1000),
+                       limits=c(0, 0.7),
+                       n.breaks=5,
+                       guide = guide_colourbar(barwidth = 25,
+                                               title.position = "top",
+                                               title.hjust = 1)
+  ) +
+  scale_y_discrete(limits = plot_order) +
+  theme_pubclean() +
+  labs(fill="Proportion", x=NULL, y="Age Group") +
+  theme(legend.position="right",
+        plot.title = element_text(hjust = 0.5, face = "bold", size=21, margin=margin(12,12,15,12)))) %>%
+  plotly::ggplotly()
+```
+
+# Methods and sources
+
+#### Reported cases by age group
+
+The cumulative number of reported cases is published in the Austrian 
+open government data portal:<br>
+[BMSGPK, Österreichisches COVID-19 Open Data Informationsportal (https://www.data.gv.at/covid-19).](https://www.data.gv.at/covid-19)
+
+Based upon a 
+[data lake with hourly snapshots, by Attila Kerekes](https://github.com/keriati/austria-covid-data),
+a time series is reconstructed from the hourly snapshots of the cumulative data by 
+calculating the difference between the last snapshot of the day and the last 
+snapshot of the previous day. 
+
+If a day has a negative number of new cases this is corrected by applying the 
+negative number of cases to the previous days such that each day has a non-negative
+notification rate. 
+
+#### Austrian population by age-group
+
+Eurostat, The Statistical Office of the European Union, 2019
+
+# Data
+
+```{r, echo=FALSE, fig.fullwidth=TRUE, layout="l-page"}
+library(DT)
+
+data %>% 
+  select(date, age_group, incidence, incidence_7day, incidence_per_capita, incidence_7day_per_capita) %>%
+  DT::datatable(extensions = 'Buttons', options = list(
+    dom = 'Bfrtip',
+    buttons = c('csv')
+  ))
+```
+
+### Imprint and privacy policy
+
+[Imprint and privacy policy](https://covid19-r.com/privacy.html)
+
+This report, the results and figures, as well as the data are made available under the
+[Creative Commons Attribution 4.0 International Public License](https://creativecommons.org/licenses/by/4.0/).
+
+Usage of the data requires attribution to the sources as described in the sources section. 
+
+The source code is available on GitHub under 
+[fvalka/covid-austria-age-heterogenity](https://github.com/fvalka/covid-austria-age-heterogenity)
+
